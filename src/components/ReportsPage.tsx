@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Papa from 'papaparse';
 import {
   AlertCircle,
@@ -7,7 +7,9 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  Link2,
   Loader2,
+  RefreshCw,
   RotateCcw,
   Upload,
   X,
@@ -15,9 +17,11 @@ import {
 import type {
   CanonicalField,
   ColumnMapping,
+  ConnectorStatus,
   DataQualityReport,
   ScoredEmployee,
   TrainingSummary,
+  WorkspacePayload,
 } from '../shared/types.ts';
 import {
   CANONICAL_FIELD_SPECS,
@@ -36,7 +40,13 @@ interface ReportsPageProps {
   qualityReport: DataQualityReport;
   trainingSummary: TrainingSummary;
   isCustomDataset: boolean;
-  onUploadCsv: (csvText: string, mapping?: Partial<ColumnMapping>) => Promise<void>;
+  connectorStatus?: ConnectorStatus;
+  onUploadCsv: (
+    csvText: string,
+    mapping?: Partial<ColumnMapping>,
+    mode?: 'replace' | 'merge'
+  ) => Promise<void>;
+  onSyncGoogleSheet: (url: string) => Promise<WorkspacePayload>;
   onResetDataset: () => Promise<void>;
 }
 
@@ -75,12 +85,29 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
   qualityReport,
   trainingSummary,
   isCustomDataset,
+  connectorStatus,
   onUploadCsv,
+  onSyncGoogleSheet,
   onResetDataset,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace');
+  const [sheetUrl, setSheetUrl] = useState(
+    connectorStatus?.googleSheetUrl ??
+      'https://script.google.com/macros/s/AKfycbyheE41_jJFZlPHmntBivpb-xCsT7pfnhDhphrp-NDJ-EgHW2gGTjUl8gnynRwmVAOjAQ/exec'
+  );
+  useEffect(() => {
+    if (connectorStatus?.googleSheetUrl) {
+      setSheetUrl(connectorStatus.googleSheetUrl);
+    }
+  }, [connectorStatus?.googleSheetUrl]);
+  const [syncingSheet, setSyncingSheet] = useState(false);
+  const [sheetStatus, setSheetStatus] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [pendingImport, setPendingImport] = useState<PendingCsvImport | null>(null);
   const [uploadStatus, setUploadStatus] = useState<{
     type: 'success' | 'error';
@@ -275,13 +302,16 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
     setUploading(true);
     setUploadStatus(null);
     try {
-      await onUploadCsv(pendingImport.csvText, pendingImport.mapping);
+      await onUploadCsv(pendingImport.csvText, pendingImport.mapping, importMode);
       const importedName = pendingImport.fileName;
       const mappedCount = Object.values(pendingImport.mapping).filter(Boolean).length;
       setPendingImport(null);
       setUploadStatus({
         type: 'success',
-        message: `Imported "${importedName}" (${mappedCount} mapped fields) — cleaned records, recalculated all analytics, and retrained all 3 ML models.`,
+        message:
+          importMode === 'merge'
+            ? `Merged "${importedName}" (${mappedCount} mapped fields) into active workforce dataset — updated records, recalculated analytics, and retrained all 3 ML models.`
+            : `Imported "${importedName}" (${mappedCount} mapped fields) — cleaned records, recalculated all analytics, and retrained all 3 ML models.`,
       });
     } catch (err) {
       setUploadStatus({
@@ -290,6 +320,33 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
       });
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleSyncSheet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSyncingSheet(true);
+    setSheetStatus(null);
+    try {
+      const result = await onSyncGoogleSheet(sheetUrl);
+      if (result.syncResult && !result.syncResult.ok) {
+        setSheetStatus({
+          type: 'error',
+          message: result.syncResult.message,
+        });
+        return;
+      }
+      setSheetStatus({
+        type: 'success',
+        message: 'Synced live dataset from Google Sheet URL — cleaned records, recalculated all analytics, and retrained all 3 ML models.',
+      });
+    } catch (err) {
+      setSheetStatus({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to sync dataset from Google Sheet URL.',
+      });
+    } finally {
+      setSyncingSheet(false);
     }
   };
 
@@ -333,6 +390,101 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Live Google Sheet Data Connector */}
+      <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200/90 dark:border-zinc-800 shadow-[0_1px_2px_rgba(0,0,0,0.03)] p-5 transition-colors">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <Link2 className="h-4 w-4 text-[#6D132B] dark:text-rose-400 shrink-0 mt-1" />
+            <div>
+              <h2 className="font-display text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                Live Google Sheet Data Connector
+              </h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                Sync employee records directly from a Google Apps Script Web App URL or a shared Google Sheet link, or use CSV upload below to replace or merge future attritions.
+              </p>
+            </div>
+          </div>
+          <div className="text-xs font-medium tabular-nums">
+            {connectorStatus?.source === 'google_sheet' ? (
+              <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Live Sheet Active ({allEmployees.length} rows)
+                {connectorStatus.lastSyncedAt && (
+                  <span className="text-zinc-500 dark:text-zinc-400 font-normal">
+                    · Synced{' '}
+                    {new Date(connectorStatus.lastSyncedAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
+              </span>
+            ) : connectorStatus?.source === 'uploaded_csv' ? (
+              <span className="text-zinc-600 dark:text-zinc-300">
+                Active Source: Uploaded CSV ({allEmployees.length} rows)
+              </span>
+            ) : (
+              <span className="text-zinc-600 dark:text-zinc-300">
+                Active Source: Baseline CSV ({allEmployees.length} rows)
+              </span>
+            )}
+          </div>
+        </div>
+
+        <form onSubmit={handleSyncSheet} className="mt-4 flex flex-col sm:flex-row gap-2.5">
+          <input
+            type="url"
+            value={sheetUrl}
+            onChange={(e) => setSheetUrl(e.target.value)}
+            placeholder="https://script.google.com/macros/s/.../exec"
+            aria-label="Google Sheet Apps Script Web App URL"
+            required
+            className="flex-1 h-9 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-800/80 px-3 text-xs font-mono text-zinc-900 dark:text-zinc-100 focus:border-[#6D132B] dark:focus:border-rose-400 focus:bg-white dark:focus:bg-zinc-800 focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={syncingSheet || uploading}
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-lg bg-[#6D132B] text-white text-xs font-semibold hover:bg-[#520B1F] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+          >
+            {syncingSheet ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Syncing Sheet...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="h-3.5 w-3.5" />
+                Sync Google Sheet
+              </>
+            )}
+          </button>
+        </form>
+
+        {(sheetStatus || (connectorStatus?.lastError && connectorStatus.source !== 'google_sheet')) && (
+          <div
+            className={`mt-3 rounded-lg border px-3 py-2 text-xs flex items-start gap-2 ${
+              sheetStatus?.type === 'success'
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200'
+                : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200'
+            }`}
+          >
+            {sheetStatus?.type === 'success' ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-0.5">
+              <div>{sheetStatus ? sheetStatus.message : `Google Sheet sync note: ${connectorStatus?.lastError}`}</div>
+              {(!sheetStatus || sheetStatus.type === 'error') && (
+                <div className="text-[11px] opacity-85">
+                  The dashboard remains active using the current dataset. Rename your Google Sheet tab to &quot;Employees&quot; (or update SHEET_NAME in Apps Script, deploy a New version with access set to &quot;Anyone&quot;), or paste a public docs.google.com/spreadsheets/d/... link, then click Sync Google Sheet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Exports & Dataset Replacement */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
         {/* Export Reports */}
@@ -599,9 +751,37 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-zinc-50 dark:bg-zinc-800/60 border-t border-zinc-200 dark:border-zinc-800">
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  Ratings above 5 (e.g. 1–10) are rescaled to 1–5; US/EU/ISO dates are normalized automatically.
-                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
+                    Import mode:
+                  </span>
+                  <div className="inline-flex rounded-lg bg-zinc-200/70 dark:bg-zinc-800 p-0.5 border border-zinc-200 dark:border-zinc-700">
+                    <button
+                      type="button"
+                      onClick={() => setImportMode('replace')}
+                      disabled={uploading}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                        importMode === 'replace'
+                          ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                          : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200'
+                      }`}
+                    >
+                      Replace Dataset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setImportMode('merge')}
+                      disabled={uploading}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                        importMode === 'merge'
+                          ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                          : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200'
+                      }`}
+                    >
+                      Merge Future Attritions
+                    </button>
+                  </div>
+                </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -624,7 +804,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({
                       </>
                     ) : (
                       <>
-                        Import &amp; Retrain Models
+                        {importMode === 'merge' ? 'Merge & Retrain Models' : 'Import & Retrain Models'}
                         <ArrowRight className="h-3.5 w-3.5" />
                       </>
                     )}

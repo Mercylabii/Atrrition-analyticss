@@ -2,5 +2,7 @@
   "name": "Meridian Attrition Analytics",
   "description": "Executive HR analytics and machine learning employee attrition prediction dashboard.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

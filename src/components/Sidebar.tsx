@@ -15,6 +15,7 @@ interface SidebarProps {
   totalEmployees: number;
   attritionRate: number;
   snapshotDate: string;
+  sourceLabel?: string;
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }
@@ -63,6 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   totalEmployees,
   attritionRate,
   snapshotDate,
+  sourceLabel,
   mobileOpen,
   onCloseMobile,
 }) => {
@@ -157,8 +159,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {attritionRate.toFixed(1)}% exit
           </span>
         </div>
-        <div className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">
-          Snapshot · {snapshotDate}
+        <div className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums truncate">
+          {sourceLabel ? `${sourceLabel} · ` : ''}Snapshot · {snapshotDate}
         </div>
       </div>
     </div>

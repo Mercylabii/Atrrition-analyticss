@@ -21,17 +21,20 @@ import {
   YAxis,
 } from 'recharts';
 import type {
+  CustomDatasetContext,
   ModelId,
   PredictionInput,
   PredictionResult,
   TrainingSummary,
   WorkspacePayload,
 } from '../shared/types.ts';
+import { postWithDatasetRehydrate } from '../utils/apiClient.ts';
 
 interface PredictionPageProps {
   options: WorkspacePayload['options'];
   trainingSummary: TrainingSummary;
   initialInput: PredictionInput;
+  customDataset?: CustomDatasetContext | null;
   onSelectModel: (modelId: ModelId) => Promise<void>;
   isDark?: boolean;
 }
@@ -165,6 +168,7 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
   options,
   trainingSummary,
   initialInput,
+  customDataset = null,
   onSelectModel,
   isDark = false,
 }) => {
@@ -210,15 +214,11 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: inputData, modelId }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.error || 'Prediction request failed.');
-      }
+      const json = await postWithDatasetRehydrate<PredictionResult>(
+        '/api/predict',
+        { input: inputData, modelId },
+        customDataset
+      );
       setPrediction(json);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to compute prediction.');
@@ -287,9 +287,12 @@ export const PredictionPage: React.FC<PredictionPageProps> = ({
 
   const handleModelSwitch = async (id: ModelId) => {
     setSwitchingModel(true);
+    setError(null);
     try {
       await onSelectModel(id);
       await runPrediction(form, id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to switch predictive model.');
     } finally {
       setSwitchingModel(false);
     }

@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Download, Menu, Moon, RefreshCw, Sun } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, Menu, Moon, RefreshCw, Sun, X } from 'lucide-react';
 import type {
   ColumnMapping,
+  CustomDatasetContext,
   FilterState,
   ModelId,
   NavSection,
   PredictionInput,
   WorkspacePayload,
 } from './shared/types.ts';
+import { fetchJson, postWithDatasetRehydrate } from './utils/apiClient.ts';
 import { applyFilters } from './utils/analytics.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { FilterBar } from './components/FilterBar.tsx';
@@ -43,6 +45,11 @@ const SECTION_META: Record<NavSection, { title: string; subtitle: string }> = {
 export default function App() {
   const [workspace, setWorkspace] = useState<WorkspacePayload | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<NavSection>('overview');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -81,9 +88,21 @@ export default function App() {
   });
 
   const [predictorSeed, setPredictorSeed] = useState<PredictionInput | null>(null);
+  const [customDataset, setCustomDataset] = useState<CustomDatasetContext | null>(null);
 
   const initFromPayload = useCallback((payload: WorkspacePayload) => {
     setWorkspace(payload);
+    if (payload.isCustomDataset && payload.activeCsvText) {
+      setCustomDataset({
+        csvText: payload.activeCsvText,
+        mapping: payload.activeMapping,
+        datasetHash: payload.datasetHash,
+        source: payload.connectorStatus?.source,
+        googleSheetUrl: payload.connectorStatus?.googleSheetUrl,
+      });
+    } else {
+      setCustomDataset(null);
+    }
     setFilters({
       department: 'All',
       jobRole: 'All',
@@ -129,9 +148,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/workspace');
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Failed to load workforce dataset.');
+      const json = await fetchJson<WorkspacePayload>('/api/workspace');
       initFromPayload(json);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to connect to analytics engine.');
@@ -163,31 +180,124 @@ export default function App() {
   }, [workspace]);
 
   const handleSelectModel = async (modelId: ModelId) => {
-    const res = await fetch('/api/select-model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelId }),
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'Model switch failed.');
+    const json = await postWithDatasetRehydrate<WorkspacePayload>(
+      '/api/select-model',
+      { modelId },
+      customDataset
+    );
     setWorkspace(json);
   };
 
-  const handleUploadCsv = async (csvText: string, mapping?: Partial<ColumnMapping>) => {
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ csvText, mapping }),
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'CSV upload failed.');
+  const handleUploadCsv = async (
+    csvText: string,
+    mapping?: Partial<ColumnMapping>,
+    mode: 'replace' | 'merge' = 'replace'
+  ) => {
+    setRefreshNotice(null);
+    const json =
+      mode === 'merge'
+        ? await postWithDatasetRehydrate<WorkspacePayload>(
+            '/api/upload',
+            { csvText, mapping, mode },
+            customDataset
+          )
+        : await fetchJson<WorkspacePayload>('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csvText, mapping, mode }),
+          });
     initFromPayload(json);
   };
 
+  const formatSheetSyncMessage = (message: string) => {
+    if (message.includes('SHEET_NAME') || message.toLowerCase().includes('not found')) {
+      return `${message} Rename the Google Sheet tab to "Employees" or update SHEET_NAME in Apps Script and redeploy.`;
+    }
+    return message;
+  };
+
+  const handleSyncGoogleSheet = async (url?: string): Promise<WorkspacePayload> => {
+    setRefreshNotice(null);
+    const json = await fetchJson<WorkspacePayload>('/api/sync-google-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (json.syncResult && !json.syncResult.ok) {
+      setWorkspace(json);
+    } else {
+      initFromPayload(json);
+    }
+    return json;
+  };
+
+  const handleRefreshWorkspace = useCallback(async () => {
+    if (!workspace || refreshing) return;
+    setRefreshing(true);
+    setRefreshNotice(null);
+    const prevHash = workspace.datasetHash;
+    const prevSource = workspace.connectorStatus?.source;
+    const targetUrl = workspace.connectorStatus?.googleSheetUrl;
+
+    try {
+      const json = await fetchJson<WorkspacePayload>('/api/sync-google-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(targetUrl ? { url: targetUrl } : {}),
+      });
+
+      if (json.syncResult && !json.syncResult.ok) {
+        setWorkspace(json);
+        setRefreshNotice({
+          type: 'error',
+          message: formatSheetSyncMessage(json.syncResult.message),
+        });
+        return;
+      }
+
+      if (json.datasetHash !== prevHash || prevSource !== 'google_sheet') {
+        initFromPayload(json);
+        setRefreshNotice({
+          type: 'success',
+          message: `Dashboard refreshed from Google Sheet (${json.employees.length} records loaded).`,
+        });
+      } else {
+        setWorkspace(json);
+        setRefreshNotice({
+          type: 'success',
+          message: `Google Sheet checked — dashboard is up to date (${json.employees.length} records).`,
+        });
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Unable to refresh from connected Google Sheet.';
+      setWorkspace((prev) =>
+        prev
+          ? {
+              ...prev,
+              connectorStatus: {
+                source: prev.connectorStatus?.source ?? 'default_csv',
+                googleSheetUrl: prev.connectorStatus?.googleSheetUrl ?? '',
+                lastSyncedAt: prev.connectorStatus?.lastSyncedAt ?? null,
+                lastError: message,
+              },
+            }
+          : prev
+      );
+      setRefreshNotice({
+        type: 'error',
+        message: formatSheetSyncMessage(message),
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [workspace, refreshing, initFromPayload]);
+
   const handleResetDataset = async () => {
-    const res = await fetch('/api/reset-dataset', { method: 'POST' });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'Dataset reset failed.');
+    setRefreshNotice(null);
+    const json = await fetchJson<WorkspacePayload>('/api/reset-dataset', {
+      method: 'POST',
+    });
     initFromPayload(json);
   };
 
@@ -292,6 +402,13 @@ export default function App() {
   const showFilterBar = activeSection === 'overview' || activeSection === 'analysis';
   const isDark = theme === 'dark';
 
+  const sourceLabel =
+    workspace.connectorStatus?.source === 'google_sheet'
+      ? 'Google Sheet'
+      : workspace.connectorStatus?.source === 'uploaded_csv'
+      ? 'Uploaded CSV'
+      : 'Baseline CSV';
+
   return (
     <div className="min-h-screen flex bg-[#F6F6F7] dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 transition-colors">
       <Sidebar
@@ -300,6 +417,7 @@ export default function App() {
         totalEmployees={workspace.employees.length}
         attritionRate={overallRate}
         snapshotDate={workspace.qualityReport.snapshotDate}
+        sourceLabel={sourceLabel}
         mobileOpen={mobileNavOpen}
         onCloseMobile={() => setMobileNavOpen(false)}
       />
@@ -326,6 +444,40 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleRefreshWorkspace}
+                disabled={refreshing || loading}
+                aria-label={
+                  workspace.connectorStatus?.source === 'google_sheet'
+                    ? 'Refresh dashboard from connected Google Sheet'
+                    : 'Reconnect dashboard to Google Sheet'
+                }
+                title={
+                  workspace.connectorStatus?.lastSyncedAt
+                    ? `Refresh from Google Sheet (Last synced ${new Date(
+                        workspace.connectorStatus.lastSyncedAt
+                      ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+                    : 'Connect or refresh dashboard from Google Sheet'
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-semibold text-zinc-800 dark:text-zinc-100 hover:bg-zinc-50 dark:hover:bg-zinc-700/80 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 text-[#6D132B] dark:text-rose-400 ${
+                    refreshing ? 'animate-spin' : ''
+                  }`}
+                />
+                <span>
+                  {refreshing
+                    ? workspace.connectorStatus?.source === 'google_sheet'
+                      ? 'Refreshing...'
+                      : 'Reconnecting...'
+                    : workspace.connectorStatus?.source === 'google_sheet'
+                    ? 'Refresh'
+                    : 'Reconnect Sheet'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={toggleTheme}
@@ -362,6 +514,39 @@ export default function App() {
         {/* Main Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6">
           <div className="max-w-[1440px] mx-auto space-y-6">
+            {refreshNotice && (
+              <div
+                role="status"
+                className={`rounded-xl border px-4 py-2.5 text-xs flex items-center justify-between gap-3 ${
+                  refreshNotice.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200'
+                    : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200'
+                }`}
+              >
+                <div className="flex items-start gap-2 min-w-0">
+                  {refreshNotice.type === 'success' ? (
+                    <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  )}
+                  <span className="leading-relaxed">
+                    {refreshNotice.message}
+                    {refreshNotice.type === 'error'
+                      ? ' Showing the last available dataset.'
+                      : ''}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRefreshNotice(null)}
+                  aria-label="Dismiss refresh notification"
+                  className="p-1 rounded-md opacity-70 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10 transition-colors shrink-0"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
             {showFilterBar && (
               <FilterBar
                 filters={filters}
@@ -406,6 +591,7 @@ export default function App() {
                 options={workspace.options}
                 trainingSummary={workspace.trainingSummary}
                 initialInput={predictorSeed}
+                customDataset={customDataset}
                 isDark={isDark}
                 onSelectModel={handleSelectModel}
               />
@@ -418,7 +604,9 @@ export default function App() {
                 qualityReport={workspace.qualityReport}
                 trainingSummary={workspace.trainingSummary}
                 isCustomDataset={workspace.isCustomDataset}
+                connectorStatus={workspace.connectorStatus}
                 onUploadCsv={handleUploadCsv}
+                onSyncGoogleSheet={handleSyncGoogleSheet}
                 onResetDataset={handleResetDataset}
               />
             )}

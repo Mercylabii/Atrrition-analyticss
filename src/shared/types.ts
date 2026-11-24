@@ -206,6 +206,28 @@ export interface FilterState {
   hireEndDate: string;
 }
 
+export type DataSourceType = 'google_sheet' | 'uploaded_csv' | 'default_csv';
+
+export interface ConnectorStatus {
+  source: DataSourceType;
+  googleSheetUrl: string;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+}
+
+export interface CustomDatasetContext {
+  csvText: string;
+  mapping?: Partial<ColumnMapping>;
+  datasetHash?: string;
+  source?: DataSourceType;
+  googleSheetUrl?: string;
+}
+
+export interface SyncResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface WorkspacePayload {
   employees: ScoredEmployee[];
   qualityReport: DataQualityReport;
@@ -220,4 +242,9 @@ export interface WorkspacePayload {
     managersByDepartment: Record<string, string[]>;
   };
   isCustomDataset: boolean;
+  datasetHash?: string;
+  connectorStatus?: ConnectorStatus;
+  syncResult?: SyncResult;
+  activeCsvText?: string;
+  activeMapping?: Partial<ColumnMapping>;
 }
